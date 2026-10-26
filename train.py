@@ -33,77 +33,48 @@ See the README and the guidebook (Pengembangan Kode section) for ideas.
 """
 
 import os
-from pathlib import Path
-
+import argparse
+from roboflow import Roboflow
 from ultralytics import YOLO
 
-# ==================== CONFIGURATION ====================
-# Dataset (Roboflow)
-ROBOFLOW_WORKSPACE = "workspace-name"  # from the dataset URL
-ROBOFLOW_PROJECT = "project-name"      # from the dataset URL
-ROBOFLOW_VERSION = 1                   # dataset version number on Roboflow
-DATASET_DIR = "dataset"                # download destination folder
-
-# Training
-MODEL = "yolov8n.pt"  # options: yolov8n.pt or yolov8s.pt
-EPOCHS = 50
-IMGSZ = 640           # must stay 640, do not change
-BATCH = 16            # lower to 8 or 4 on out-of-memory errors
-SEED = 0
-# =======================================================
-
-
-def get_dataset() -> Path:
-    """Return the path to data.yaml, downloading from Roboflow if it is missing."""
-    data_yaml = Path(DATASET_DIR) / "data.yaml"
-    if data_yaml.exists():
-        print(f"Dataset already exists, skipping download: {data_yaml}")
-        return data_yaml
-
-    api_key = os.environ.get("ROBOFLOW_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ROBOFLOW_API_KEY is not set. See the 'Run' section at the top of this file."
-        )
-
-    from roboflow import Roboflow  # imported here: not needed if the dataset already exists
-
-    rf = Roboflow(api_key=api_key)
-    version = rf.workspace(ROBOFLOW_WORKSPACE).project(ROBOFLOW_PROJECT).version(ROBOFLOW_VERSION)
-    dataset = version.download("yolov8", location=DATASET_DIR)
-
-    data_yaml = Path(dataset.location) / "data.yaml"
-    if not data_yaml.exists():
-        raise FileNotFoundError(f"data.yaml not found after download: {data_yaml}")
-    return data_yaml
-
-
 def main():
-    data_path = get_dataset()
+    # PENGEMBANGAN 1: Menambahkan argumen CLI (argparse) agar gampang eksperimen
+    parser = argparse.ArgumentParser(description="Training YOLOv8 untuk PENSHIP")
+    parser.add_argument("--model", type=str, default="yolov8n.pt", help="Pilih model (yolov8n.pt / yolov8s.pt)")
+    parser.add_argument("--epochs", type=int, default=50, help="Jumlah epoch")
+    parser.add_argument("--batch", type=int, default=16, help="Ukuran batch")
+    args = parser.parse_args()
 
-    # Pretrained model (weights are downloaded automatically on first use)
-    model = YOLO(MODEL)
+    # 1. Download Dataset dari Roboflow (Pakai Environment Variable agar aman)
+    rf = Roboflow(api_key=os.environ.get("ROBOFLOW_API_KEY"))
+    project = rf.workspace("herdians-workspace-f6bfc").project("penship-detection-wbcjs")
+    version = project.version(2) # Ganti angka 1 dengan nomor version dataset Anda
+    dataset = version.download("yolov8")
 
-    # Training. Uses the GPU automatically if available, otherwise the CPU.
-    model.train(
-        data=str(data_path),
-        epochs=EPOCHS,
-        imgsz=IMGSZ,
-        batch=BATCH,
-        seed=SEED,
+    # 2. Load Model YOLO
+    model = YOLO(args.model)
+
+    print(f"Mulai training menggunakan model {args.model} selama {args.epochs} epoch...")
+
+    # PENGEMBANGAN 2 & 3: Hyperparameter Tuning (AdamW) dan Augmentasi Data (Cahaya & Rotasi)
+    results = model.train(
+        data=f"{dataset.location}/data.yaml",
+        epochs=args.epochs,
+        batch=args.batch,
+        imgsz=640,
+        optimizer="AdamW",     # Tuning optimizer agar lebih stabil
+        lr0=0.001,             # Learning rate
+        patience=20,           # Early stopping (berhenti jika model mulai overfitting)
+        hsv_h=0.015,           # Augmentasi warna (Tahan variasi silau/gelap)
+        hsv_s=0.7,
+        hsv_v=0.4,
+        degrees=15.0,          # Augmentasi rotasi (Tahan objek yang difoto miring)
+        mosaic=1.0             # Menggabungkan 4 foto jadi 1 agar AI lebih teliti
     )
 
-    # Training output folder (runs/detect/train, train2, ...)
-    save_dir = Path(model.trainer.save_dir)
-    best_path = save_dir / "weights" / "best.pt"
-    print(f"\nBest model saved to: {best_path}")
+    # PENGEMBANGAN 4: Auto-export model ke format ONNX untuk deployment di SBC Kapal
+    model.export(format="onnx")
+    print("Training Selesai! Model terbaik tersimpan di folder runs/detect/train/weights/best.pt")
 
-    # Evaluate the best model on the validation split
-    best_model = YOLO(str(best_path))
-    metrics = best_model.val(data=str(data_path), imgsz=IMGSZ)
-    print(f"mAP50-95: {metrics.box.map:.3f} | mAP50: {metrics.box.map50:.3f}")
-
-
-# Required guard, especially on Windows (the dataloader uses multiprocessing)
 if __name__ == "__main__":
     main()
